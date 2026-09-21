@@ -653,7 +653,7 @@ function startAnalysis(isInstant = false) {
     const masa = rawRows[0]?.masa_ut || '';
     document.getElementById('headerSubtitle').textContent = `Masa Ujian: ${masa} · ${rawRows.length.toLocaleString('id')} nilai · ${mhsList.length.toLocaleString('id')} mahasiswa`;
     
-    if (isInstant) showToast('success', 'Berhasil Dimuat', 'Sesi sebelumnya berhasil dipulihkan secara instan dari Memori.');
+    if (isInstant) showToast('success', 'Berhasil Dimuat', 'Berhasil memuat data dari sesi terakhir.');
   }, isInstant ? 0 : 80);
 }
 
