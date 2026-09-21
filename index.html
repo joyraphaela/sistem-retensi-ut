@@ -460,7 +460,7 @@ window.onload = async () => {
   try {
     const meta = await db.metadata.get('current');
     if (meta) {
-      showLoader('Memuat data secara instan dari IndexedDB...');
+      showLoader('Memuat data ...');
       
       // Mengambil seluruh data nilai dengan super cepat!
       rawRows = await db.dataNilai.toArray();
@@ -476,7 +476,7 @@ window.onload = async () => {
       }
     }
   } catch (err) {
-    console.error("Gagal memeriksa sesi IndexedDB:", err);
+    console.error("Gagal memeriksa sesi", err);
   } finally {
     hideLoader();
   }
@@ -575,7 +575,7 @@ function handleFileUpload(file) {
         rawRows = workerEvent.data.data;
         const masa = workerEvent.data.masa;
 
-        showLoader('Menyimpan ke IndexedDB (bulkPut)...');
+        showLoader('Menyimpan data...');
         try {
           // Menyimpan hasil secara massal via Dexie transaction
           await db.transaction('rw', db.metadata, db.dataNilai, async () => {
@@ -592,7 +592,7 @@ function handleFileUpload(file) {
           dropZone.classList.add('loaded');
           document.getElementById('analyzeBtn').disabled = false;
         } catch (dbErr) {
-          showUploadError('Gagal menyimpan ke IndexedDB: ' + dbErr.message);
+          showUploadError('Gagal menyimpan data ' + dbErr.message);
         }
       } else {
         showUploadError(workerEvent.data.error);
@@ -653,7 +653,7 @@ function startAnalysis(isInstant = false) {
     const masa = rawRows[0]?.masa_ut || '';
     document.getElementById('headerSubtitle').textContent = `Masa Ujian: ${masa} · ${rawRows.length.toLocaleString('id')} nilai · ${mhsList.length.toLocaleString('id')} mahasiswa`;
     
-    if (isInstant) showToast('success', 'Berhasil Dimuat', 'Sesi sebelumnya berhasil dipulihkan secara instan dari IndexedDB.');
+    if (isInstant) showToast('success', 'Berhasil Dimuat', 'Sesi sebelumnya berhasil dipulihkan secara instan dari Memori.');
   }, isInstant ? 0 : 80);
 }
 
