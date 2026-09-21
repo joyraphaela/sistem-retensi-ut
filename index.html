@@ -3,10 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Retensi Mahasiswa — UT  </title>
+<title>Retensi Mahasiswa — UT</title>
+
+<!-- Tailwind CSS -->
 <script src="https://cdn.tailwindcss.com"></script>
+<!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- SheetJS -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- Dexie.js untuk IndexedDB -->
+<script src="https://unpkg.com/dexie@3.2.4/dist/dexie.js"></script>
+
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="https://www.ut.ac.id/wp-content/uploads/2015/11/logo-ut-small-transparent.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -66,7 +73,7 @@ tbody td{padding:10px 14px;font-size:12.5px;vertical-align:middle}
 .rfill{height:100%;border-radius:3px}
 
 /* Loader */
-#loader{display:none;position:fixed;inset:0;background:rgba(255,255,255,.85);z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:16px}
+#loader{display:none;position:fixed;inset:0;background:rgba(255,255,255,.95);z-index:200;align-items:center;justify-content:center;flex-direction:column;gap:16px}
 .spin{width:40px;height:40px;border:4px solid #e2e8f0;border-top-color:#0d47a1;border-radius:50%;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -411,7 +418,7 @@ tbody td{padding:10px 14px;font-size:12.5px;vertical-align:middle}
 </div>
 
 <!-- LOADER -->
-<div id="loader" style="display:flex;display:none">
+<div id="loader" style="display:none">
   <div class="spin"></div>
   <p class="text-slate-600 font-semibold text-sm" id="loaderMsg">Memproses data...</p>
 </div>
@@ -427,7 +434,7 @@ tbody td{padding:10px 14px;font-size:12.5px;vertical-align:middle}
 
 <script>
 // ══════════════════════════════════════════════════
-// STATE
+// STATE & DATABASE INIT
 // ══════════════════════════════════════════════════
 let rawRows = [];        // {masa_ut, nim, nama, kode_mk, nama_mk, grade}
 let mhsMap = {};         // nim → {nama, prodi, grades[], D, E, Cm, total, score, level, badMKs[]}
@@ -440,8 +447,43 @@ const PAGE_SIZE = 50;
 let chartGradeInst, chartRiskInst, chartMkPctInst, chartMkAbsInst, chartProdiInst;
 const FONT = "'Plus Jakarta Sans',sans-serif";
 
+// Inisialisasi Database Dexie
+const db = new Dexie("RetensiDB");
+db.version(1).stores({
+  metadata: 'id',                           // id string "current"
+  dataNilai: '++id, nim, kode_mk, grade'    // id auto-increment untuk bulkPut yang efisien
+});
+
+// Mengecek ketersediaan data secara asinkron saat web pertama kali dimuat (Refresh)
+window.onload = async () => {
+  showLoader('Memeriksa memori lokal...');
+  try {
+    const meta = await db.metadata.get('current');
+    if (meta) {
+      showLoader('Memuat data secara instan dari IndexedDB...');
+      
+      // Mengambil seluruh data nilai dengan super cepat!
+      rawRows = await db.dataNilai.toArray();
+      
+      if (rawRows.length > 0) {
+        document.getElementById('fileInfo').classList.remove('hidden');
+        document.getElementById('fileName').textContent = meta.fileName;
+        document.getElementById('fileStats').textContent = `${rawRows.length.toLocaleString('id')} baris dimuat dari memori lokal · Masa ${meta.masa}`;
+        document.getElementById('dropZone').classList.add('loaded');
+        
+        // Mem-bypass tampilan upload, langsung analisis data yang sudah ter-load
+        startAnalysis(true); 
+      }
+    }
+  } catch (err) {
+    console.error("Gagal memeriksa sesi IndexedDB:", err);
+  } finally {
+    hideLoader();
+  }
+};
+
 // ══════════════════════════════════════════════════
-// FILE HANDLING
+// FILE HANDLING & WEB WORKER
 // ══════════════════════════════════════════════════
 const dropZone = document.getElementById('dropZone');
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
@@ -454,65 +496,123 @@ function handleFileUpload(file) {
   if (!['xlsx','xls'].includes(ext)) {
     showUploadError('Format file tidak didukung. Gunakan .xlsx atau .xls'); return;
   }
+  
   document.getElementById('uploadError').classList.add('hidden');
+  showLoader('Memproses Excel dengan Web Worker...');
+
   const reader = new FileReader();
   reader.onload = e => {
-    try {
-      const wb = XLSX.read(e.target.result, {type:'array'});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(ws, {defval:''});
+    // ArrayBuffer dari file Excel
+    const dataBuf = e.target.result; 
 
-      if (!data.length) { showUploadError('Sheet kosong atau tidak terbaca.'); return; }
+    // Menciptakan Inline Web Worker agar tab browser tidak nge-freeze saat load 16k+ baris!
+    const workerCode = `
+      self.onmessage = function(e) {
+        try {
+          // Worker menggunakan importScripts untuk memanggil SheetJS
+          importScripts('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+          
+          const arrayBuffer = e.data.buffer;
+          const wb = XLSX.read(arrayBuffer, {type:'array'});
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const data = XLSX.utils.sheet_to_json(ws, {defval:''});
 
-      // Normalize column names (lowercase, trim)
-      const norm = data.map(r => {
-        const out = {};
-        for (const k in r) out[k.toLowerCase().trim().replace(/\s+/g,'_')] = r[k];
-        return out;
-      });
+          if (!data.length) throw new Error('Sheet kosong atau tidak terbaca.');
 
-      // Detect columns
-      const sample = norm[0];
-      const colNim   = findCol(sample, ['nim','nomor_induk','no_nim']);
-      const colNama  = findCol(sample, ['nama_mahasiswa','nama','name']);
-      const colKode  = findCol(sample, ['kode_matakuliah','kode_mk','kode']);
-      const colMkNm  = findCol(sample, ['nama_matakuliah','mata_kuliah','matakuliah','nama_mk']);
-      const colGrade = findCol(sample, ['grade','nilai','grade_nilai']);
-      const colMasa  = findCol(sample, ['masa_ut','masa','semester','period']);
+          // Normalisasi header kolom (lowercase, ubah spasi jadi underscore)
+          const norm = data.map(r => {
+            const out = {};
+            for (const k in r) out[k.toLowerCase().trim().replace(/\\s+/g,'_')] = r[k];
+            return out;
+          });
 
-      if (!colNim || !colNama || !colGrade) {
-        showUploadError('Kolom wajib tidak ditemukan: nim, nama_mahasiswa, grade. Periksa header file Excel Anda.'); return;
+          const sample = norm[0];
+          function findCol(obj, candidates) {
+            for (const c of candidates) if (c in obj) return c;
+            for (const k in obj) for (const c of candidates) if (k.includes(c.split('_')[0])) return k;
+            return null;
+          }
+
+          const colNim   = findCol(sample, ['nim','nomor_induk','no_nim']);
+          const colNama  = findCol(sample, ['nama_mahasiswa','nama','name']);
+          const colKode  = findCol(sample, ['kode_matakuliah','kode_mk','kode']);
+          const colMkNm  = findCol(sample, ['nama_matakuliah','mata_kuliah','matakuliah','nama_mk']);
+          const colGrade = findCol(sample, ['grade','nilai','grade_nilai']);
+          const colMasa  = findCol(sample, ['masa_ut','masa','semester','period']);
+
+          if (!colNim || !colNama || !colGrade) {
+            throw new Error('Kolom wajib tidak ditemukan: nim, nama_mahasiswa, grade. Periksa format/header Excel Anda.');
+          }
+
+          const validGrades = ['A','A-','B','B-','C','C-','D','E'];
+          
+          // Memfilter row yang valid
+          const result = norm.filter(r => r[colNim] && r[colGrade]).map(r => ({
+            masa_ut: String(r[colMasa] || ''),
+            nim: String(r[colNim]).trim(),
+            nama: String(r[colNama]).trim().toUpperCase(),
+            kode_mk: colKode ? String(r[colKode]).trim() : '',
+            nama_mk: colMkNm ? String(r[colMkNm]).trim() : '',
+            grade: String(r[colGrade]).trim().toUpperCase()
+          })).filter(r => validGrades.includes(r.grade));
+
+          if (!result.length) throw new Error('Tidak ada data valid dengan grade A-E.');
+
+          // Mengembalikan hasil ke Main Thread
+          self.postMessage({ success: true, data: result, masa: result[0].masa_ut });
+        } catch (err) {
+          self.postMessage({ success: false, error: err.message });
+        }
+      };
+    `;
+
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+
+    // Menerima hasil dari Worker secara asinkron
+    worker.onmessage = async (workerEvent) => {
+      if (workerEvent.data.success) {
+        rawRows = workerEvent.data.data;
+        const masa = workerEvent.data.masa;
+
+        showLoader('Menyimpan ke IndexedDB (bulkPut)...');
+        try {
+          // Menyimpan hasil secara massal via Dexie transaction
+          await db.transaction('rw', db.metadata, db.dataNilai, async () => {
+            await db.metadata.clear();
+            await db.dataNilai.clear();
+            await db.dataNilai.bulkPut(rawRows); 
+            await db.metadata.put({ id: 'current', fileName: file.name, masa: masa });
+          });
+
+          // Sukses! Update layar antarmuka
+          document.getElementById('fileInfo').classList.remove('hidden');
+          document.getElementById('fileName').textContent = file.name;
+          document.getElementById('fileStats').textContent = `${rawRows.length.toLocaleString('id')} baris nilai · ${new Set(rawRows.map(r=>r.nim)).size.toLocaleString('id')} mahasiswa · Masa ${masa}`;
+          dropZone.classList.add('loaded');
+          document.getElementById('analyzeBtn').disabled = false;
+        } catch (dbErr) {
+          showUploadError('Gagal menyimpan ke IndexedDB: ' + dbErr.message);
+        }
+      } else {
+        showUploadError(workerEvent.data.error);
       }
+      hideLoader();
+      worker.terminate(); // Menutup worker setelah selesai bekerja
+    };
 
-      rawRows = norm.filter(r => r[colNim] && r[colGrade]).map(r => ({
-        masa_ut: r[colMasa] || '',
-        nim: String(r[colNim]).trim(),
-        nama: String(r[colNama]).trim().toUpperCase(),
-        kode_mk: colKode ? String(r[colKode]).trim() : '',
-        nama_mk: colMkNm ? String(r[colMkNm]).trim() : '',
-        grade: String(r[colGrade]).trim().toUpperCase()
-      })).filter(r => ['A','A-','B','B-','C','C-','D','E'].includes(r.grade));
+    worker.onerror = (err) => {
+      showUploadError('Terjadi kesalahan tidak terduga pada Web Worker.');
+      console.error(err);
+      hideLoader();
+      worker.terminate();
+    };
 
-      if (!rawRows.length) { showUploadError('Tidak ada data valid. Pastikan kolom grade berisi A/A-/B/B-/C/C-/D/E'); return; }
-
-      const masa = rawRows[0].masa_ut;
-      document.getElementById('fileInfo').classList.remove('hidden');
-      document.getElementById('fileName').textContent = file.name;
-      document.getElementById('fileStats').textContent = `${rawRows.length.toLocaleString('id')} baris nilai · ${new Set(rawRows.map(r=>r.nim)).size.toLocaleString('id')} mahasiswa · Masa ${masa}`;
-      dropZone.classList.add('loaded');
-      document.getElementById('analyzeBtn').disabled = false;
-    } catch(err) {
-      showUploadError('Gagal membaca file: ' + err.message);
-    }
+    // Melemparkan data ke Worker menggunakan zero-copy transfer agar cepat!
+    worker.postMessage({ buffer: dataBuf }, [dataBuf]); 
   };
+  
   reader.readAsArrayBuffer(file);
-}
-
-function findCol(obj, candidates) {
-  for (const c of candidates) if (c in obj) return c;
-  // fuzzy
-  for (const k in obj) for (const c of candidates) if (k.includes(c.split('_')[0])) return k;
-  return null;
 }
 
 function showUploadError(msg) {
@@ -520,31 +620,41 @@ function showUploadError(msg) {
   document.getElementById('uploadError').classList.remove('hidden');
 }
 
-function resetUpload() {
-  document.getElementById('uploadScreen').style.display = 'flex';
-  document.getElementById('dashScreen').style.display = 'none';
-  document.getElementById('fileInfo').classList.add('hidden');
-  document.getElementById('analyzeBtn').disabled = true;
-  dropZone.classList.remove('loaded','drag');
-  rawRows = []; mhsMap = {}; mkMap = {}; mhsList = []; mkList = [];
+// Menghapus data IndexedDB ketika akan mengganti file, dan me-reload laman.
+async function resetUpload() {
+  showLoader("Membersihkan data lama...");
+  try {
+    await db.metadata.clear();
+    await db.dataNilai.clear();
+    // Memuat ulang tab sehingga tab tersebut bersih secara sempurna layaknya baru dibuka
+    location.reload(); 
+  } catch(e) {
+    console.error("Gagal saat reset:", e);
+    hideLoader();
+  }
 }
 
 // ══════════════════════════════════════════════════
 // ANALYSIS ENGINE
 // ══════════════════════════════════════════════════
-function startAnalysis() {
-  showLoader('Menganalisis data...');
+function startAnalysis(isInstant = false) {
+  if (!isInstant) showLoader('Menganalisis data & Membuat Tabel...');
+  
   setTimeout(() => {
     buildMhsMap();
     buildMkMap();
     buildSortedLists();
     renderDashboard();
+    
     hideLoader();
     document.getElementById('uploadScreen').style.display = 'none';
     document.getElementById('dashScreen').style.display = 'block';
+    
     const masa = rawRows[0]?.masa_ut || '';
     document.getElementById('headerSubtitle').textContent = `Masa Ujian: ${masa} · ${rawRows.length.toLocaleString('id')} nilai · ${mhsList.length.toLocaleString('id')} mahasiswa`;
-  }, 80);
+    
+    if (isInstant) showToast('success', 'Berhasil Dimuat', 'Sesi sebelumnya berhasil dipulihkan secara instan dari IndexedDB.');
+  }, isInstant ? 0 : 80);
 }
 
 function buildMhsMap() {
@@ -1019,7 +1129,7 @@ function copyWaMsg() {
 }
 
 // ══════════════════════════════════════════════════
-// EXPORT
+// EXPORT & UTILS
 // ══════════════════════════════════════════════════
 function exportMhsCSV() {
   const filtered = getMhsFiltered();
@@ -1044,9 +1154,6 @@ function dlCSV(csv, fname) {
 
 function printReport() { window.print(); }
 
-// ══════════════════════════════════════════════════
-// UTILS
-// ══════════════════════════════════════════════════
 function switchTab(tab, btn) {
   ['overview','mhs','mk','zonabahaya'].forEach(t => {
     document.getElementById('tab-'+t)?.classList.toggle('hidden', t !== tab);
